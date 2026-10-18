@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Matthewyin/deepseek-mcp",
+  "title": "DeepSeek Web Search",
+  "description": "MCP server for DeepSeek web Search & Fetch: scored web search + page-to-Markdown fetch",
+  "repository": {
+    "url": "https://github.com/Matthewyin/deepseek-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "mcp-deepseek-search",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DEEPSEEK_API_KEY",
+          "description": "DeepSeek API key from https://platform.deepseek.com",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

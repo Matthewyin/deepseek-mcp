@@ -1,0 +1,18 @@
+# Smithery (https://smithery.ai) deployment configuration
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      deepseekApiKey:
+        type: string
+        title: DeepSeek API Key
+        description: Create one at https://platform.deepseek.com
+    required:
+      - deepseekApiKey
+  commandFunction: |-
+    (config) => ({
+      command: "node",
+      args: ["dist/index.js"],
+      env: { DEEPSEEK_API_KEY: config.deepseekApiKey }
+    })
