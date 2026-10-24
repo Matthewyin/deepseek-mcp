@@ -1,6 +1,7 @@
 {
   "name": "mcp-deepseek-search",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "mcpName": "io.github.Matthewyin/deepseek-mcp",
   "description": "MCP server exposing DeepSeek's web Search & Fetch tools — web search with rerank/authority scoring and page-to-Markdown fetching, for Claude Desktop, Cursor, Cline, ZCode and any MCP client.",
   "license": "MIT",
   "type": "module",
