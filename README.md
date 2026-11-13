@@ -4,9 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.Matthewyin-blue)](https://registry.modelcontextprotocol.io)
 
-An [Model Context Protocol](https://modelcontextprotocol.io) server that exposes [DeepSeek's web **Search** and **Fetch** tools](https://api-docs.deepseek.com/zh-cn/guides/search) to any MCP client — Claude Desktop, Claude Code, Cursor, Cline, ZCode, and more.
+An [Model Context Protocol](https://modelcontextprotocol.io) server that exposes [DeepSeek's web **Search**, **Fetch**, **OCR**, **ASR** and **TTS** tools](https://api-docs.deepseek.com/zh-cn/api/search) to any MCP client — Claude Desktop, Claude Code, Cursor, Cline, ZCode, and more.
 
-Works with **any** LLM: the search runs on DeepSeek's own search engine, but the results are returned to your existing model as ordinary tool output.
+Works with **any** LLM: the tools run on DeepSeek's APIs, but the results are returned to your existing model as ordinary tool output.
 
 ## Features
 
@@ -14,6 +14,9 @@ Works with **any** LLM: the search runs on DeepSeek's own search engine, but the
   - `rerank_score` (0–3): relevance; **≥ 1.5 = highly relevant**
   - `authority` (0–4, `-1` unknown): source authority; **≥ 3 = highly authoritative**
 - **`deepseek_fetch`** — fetch a single page and get its main content as Markdown
+- **`deepseek_ocr`** — extract text from PDF / Word / PPT / images (incl. scanned pages), per page
+- **`deepseek_asr`** — transcribe 16-bit PCM WAV or Ogg Opus audio to text
+- **`deepseek_tts`** — synthesize speech (`stella` female / `tide` male) to a local wav/pcm file
 - Powerful query syntax: `site:`, `-site:`, `-term`, `"exact phrase"`, `-"phrase"`, `lang:zh,en`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`
 - Built-in throttling (stays under the 5 QPS account limit) and automatic retry on 408/429/5xx
 - Response-size friendly: summaries by default, full page text only on request
@@ -73,6 +76,32 @@ Each result includes `title`, `url`, `snippet` (short, for display), `summary` (
 
 Returns `title` + Markdown `content` (truncated at 30,000 chars).
 
+### `deepseek_ocr`
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `file_path` | string | yes | Local path to a PDF, Word, PowerPoint or image file |
+| `purpose` | string | no | `text_recognition` (default) or `rich_layout_recognition` (page-by-page layout-aware recognition) |
+
+Returns per-page `text` (each page truncated at 8,000 chars) with `page_count` and `finish_reason` per page.
+
+### `deepseek_asr`
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `file_path` | string | yes | Local path to 16-bit PCM WAV or Ogg Opus audio |
+
+Returns `text` and `duration_ms`.
+
+### `deepseek_tts`
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `text` | string | yes | The text to speak |
+| `voice_id` | string | no | `stella` (female, default) or `tide` (male) |
+| `format` | string | no | `wav` (default) or raw `pcm` (24 kHz, 16-bit signed, mono) |
+| `output_path` | string | no | Where to write the audio file; defaults to a temp file. The resolved path is returned |
+
 ## Example
 
 Ask your agent: *"用 deepseek_search 搜一下最近一周关于 MCP 的大新闻，挑权威来源，再用 deepseek_fetch 读全文总结"* — or in English: *"Search for recent DeepSeek news, keep only results with authority ≥ 3, fetch the top one and summarize."*
@@ -82,6 +111,7 @@ Ask your agent: *"用 deepseek_search 搜一下最近一周关于 MCP 的大新�
 - Rate limit is **5 QPS per DeepSeek account** (shared across all your API keys); the server throttles automatically.
 - HTTP 402 means your DeepSeek balance ran out; 401 means the key is invalid.
 - Page content depends on the target site's availability and access policy.
+- OCR / ASR / TTS have their own file-format and billing rules — see the [API docs](https://api-docs.deepseek.com/zh-cn/api/ocr) for details.
 - This is an unofficial community wrapper; not affiliated with DeepSeek.
 
 ## Development

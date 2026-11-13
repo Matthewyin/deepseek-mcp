@@ -5,10 +5,16 @@
  * Upstream endpoints (requires a DeepSeek API key via DEEPSEEK_API_KEY):
  *   POST https://api.deepseek.com/v1/tools/search
  *   POST https://api.deepseek.com/v1/tools/fetch
+ *   POST https://api.deepseek.com/v1/tools/ocr    (multipart)
+ *   POST https://api.deepseek.com/v1/tools/asr    (multipart)
+ *   POST https://api.deepseek.com/v1/tools/tts    (binary audio response)
  *
  * API docs: https://api-docs.deepseek.com/zh-cn/guides/search
  */
 import { createRequire } from "node:module";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -19,6 +25,9 @@ const { version: VERSION } = require("../package.json") as { version: string };
 const API_BASE = (process.env.DEEPSEEK_API_BASE || "https://api.deepseek.com").replace(/\/+$/, "");
 const SEARCH_ENDPOINT = `${API_BASE}/v1/tools/search`;
 const FETCH_ENDPOINT = `${API_BASE}/v1/tools/fetch`;
+const OCR_ENDPOINT = `${API_BASE}/v1/tools/ocr`;
+const ASR_ENDPOINT = `${API_BASE}/v1/tools/asr`;
+const TTS_ENDPOINT = `${API_BASE}/v1/tools/tts`;
 
 const MAX_CONTENT_CHARS_PER_RESULT = 8000;
 const MAX_FETCH_CONTENT_CHARS = 30000;
@@ -78,8 +87,9 @@ function friendlyStatus(status: number, body: string): string {
 
 async function callToolApi(
   endpoint: string,
-  body: Record<string, unknown>,
-  timeoutMs: number
+  body: Record<string, unknown> | FormData,
+  timeoutMs: number,
+  opts: { binary?: boolean } = {}
 ): Promise<unknown> {
   let lastError: unknown = new Error("request failed");
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -87,16 +97,20 @@ async function callToolApi(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      // For FormData, let fetch set the multipart Content-Type with its boundary.
       const res = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey()}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
+        headers:
+          body instanceof FormData
+            ? { Authorization: `Bearer ${apiKey()}` }
+            : {
+                Authorization: `Bearer ${apiKey()}`,
+                "Content-Type": "application/json",
+              },
+        body: body instanceof FormData ? body : JSON.stringify(body),
         signal: controller.signal,
       });
-      if (res.ok) return await res.json();
+      if (res.ok) return opts.binary ? Buffer.from(await res.arrayBuffer()) : await res.json();
       const text = await res.text().catch(() => "");
       const err = new ApiError(res.status, friendlyStatus(res.status, text));
       if (!RETRYABLE_STATUS.has(res.status)) throw err;
@@ -142,6 +156,17 @@ function toolError(tool: string, err: unknown) {
     content: [{ type: "text" as const, text: `${tool} failed: ${message}` }],
     isError: true,
   };
+}
+
+async function readFileForUpload(filePath: string): Promise<Buffer> {
+  try {
+    return await readFile(filePath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new Error(`File not found: ${filePath}`);
+    if (code === "EISDIR") throw new Error(`Path is a directory, not a file: ${filePath}`);
+    throw err;
+  }
 }
 
 const server = new McpServer({ name: "mcp-deepseek-search", version: VERSION });
@@ -231,6 +256,143 @@ server.registerTool(
       return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
     } catch (err) {
       return toolError("deepseek_fetch", err);
+    }
+  }
+);
+
+server.registerTool(
+  "deepseek_ocr",
+  {
+    title: "DeepSeek OCR",
+    description:
+      "Extract text from PDF, Word, PowerPoint or image files (including scanned pages) via DeepSeek's OCR API. " +
+      "Returns the recognized text per page. Set purpose=rich_layout_recognition to force page-by-page layout-aware " +
+      "recognition (better for complex layouts); the default text_recognition extracts plain text directly from " +
+      "image-free Word/PPT files.",
+    inputSchema: {
+      file_path: z
+        .string()
+        .min(1)
+        .describe("Local path of the file to recognize (PDF, Word, PPT or image). Absolute path recommended."),
+      purpose: z
+        .enum(["text_recognition", "rich_layout_recognition"])
+        .optional()
+        .describe("text_recognition (default) or rich_layout_recognition (page-by-page layout-aware recognition)."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async (args) => {
+    try {
+      const buffer = await readFileForUpload(args.file_path);
+      const form = new FormData();
+      form.append("file", new Blob([new Uint8Array(buffer)]), basename(args.file_path));
+      form.append("purpose", args.purpose ?? "text_recognition");
+      const data = (await callToolApi(OCR_ENDPOINT, form, 120_000)) as {
+        id?: string;
+        purpose?: string;
+        page_count?: number;
+        pages?: Record<string, unknown>[];
+        usage?: Record<string, unknown>;
+      };
+      const pages = Array.isArray(data.pages) ? data.pages : [];
+      const payload = {
+        id: data.id,
+        purpose: data.purpose,
+        page_count: data.page_count,
+        pages: pages.map((p) => ({
+          index: p.index,
+          finish_reason: p.finish_reason,
+          text: truncate(p.text, MAX_CONTENT_CHARS_PER_RESULT),
+        })),
+        usage: data.usage,
+      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
+    } catch (err) {
+      return toolError("deepseek_ocr", err);
+    }
+  }
+);
+
+server.registerTool(
+  "deepseek_asr",
+  {
+    title: "DeepSeek ASR (Speech-to-Text)",
+    description:
+      "Transcribe an audio file to text via DeepSeek's ASR API. " +
+      "The audio must be 16-bit PCM WAV or Ogg Opus; convert other formats first if needed.",
+    inputSchema: {
+      file_path: z
+        .string()
+        .min(1)
+        .describe("Local path of the audio file (16-bit PCM WAV or Ogg Opus). Absolute path recommended."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async (args) => {
+    try {
+      const buffer = await readFileForUpload(args.file_path);
+      const form = new FormData();
+      form.append("file", new Blob([new Uint8Array(buffer)]), basename(args.file_path));
+      const data = (await callToolApi(ASR_ENDPOINT, form, 120_000)) as {
+        request_id?: string;
+        text?: string;
+        duration_ms?: number;
+      };
+      const payload = {
+        request_id: data.request_id,
+        text: data.text,
+        duration_ms: data.duration_ms,
+      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
+    } catch (err) {
+      return toolError("deepseek_asr", err);
+    }
+  }
+);
+
+server.registerTool(
+  "deepseek_tts",
+  {
+    title: "DeepSeek TTS (Text-to-Speech)",
+    description:
+      "Synthesize speech from text via DeepSeek's TTS API and save it as a local audio file. " +
+      "Returns the output file path; play it with a local player or pass it to the user. " +
+      "Markdown syntax is stripped before synthesis by default.",
+    inputSchema: {
+      text: z.string().min(1).describe("The text to speak. Must not be empty."),
+      voice_id: z
+        .enum(["stella", "tide"])
+        .optional()
+        .describe("Voice: stella (female, default) or tide (male)."),
+      format: z
+        .enum(["wav", "pcm"])
+        .optional()
+        .describe("Audio format: wav (default) or raw pcm (24 kHz, 16-bit signed, mono)."),
+      output_path: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Where to write the audio file. Defaults to a temp file; the resolved path is in the result."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async (args) => {
+    try {
+      const format = args.format ?? "wav";
+      const body: Record<string, unknown> = { text: args.text, format };
+      if (args.voice_id) body.voice_id = args.voice_id;
+      const audio = (await callToolApi(TTS_ENDPOINT, body, 120_000, { binary: true })) as Buffer;
+      const outPath = args.output_path ?? join(tmpdir(), `deepseek-tts-${Date.now()}.${format}`);
+      await mkdir(dirname(outPath), { recursive: true });
+      await writeFile(outPath, audio);
+      const payload = {
+        output_path: outPath,
+        format,
+        bytes: audio.length,
+      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
+    } catch (err) {
+      return toolError("deepseek_tts", err);
     }
   }
 );
