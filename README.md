@@ -1,5 +1,7 @@
 # mcp-deepseek-search
 
+[简体中文](https://github.com/Matthewyin/deepseek-mcp/blob/main/README.zh-CN.md)
+
 [![npm version](https://img.shields.io/npm/v/mcp-deepseek-search.svg)](https://www.npmjs.com/package/mcp-deepseek-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.Matthewyin-blue)](https://registry.modelcontextprotocol.io)
@@ -124,7 +126,7 @@ npm run test:security           # file tool regression tests with a local mock A
 DEEPSEEK_API_KEY=sk-... npm test   # end-to-end test against the real API
 ```
 
-Releases are automated via GitHub Actions: pushing a `v*` tag publishes to npm and the official MCP Registry.
+Pushing a `v*` tag starts a GitHub Actions release. After publishing to npm, the workflow waits for the exact package version to appear in the public npm registry before publishing `server.json` to the official MCP Registry. The npm visibility check times out after 10 minutes.
 
 ## License
 

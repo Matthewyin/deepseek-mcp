@@ -1,8 +1,7 @@
 name: Publish to MCP Registry
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_call:
   workflow_dispatch:
 
 jobs:
@@ -13,6 +12,26 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Wait for the version to be visible on npm
+        shell: bash
+        run: |
+          package=$(jq -er '.packages[0].identifier' server.json)
+          version=$(jq -er '.packages[0].version' server.json)
+          package_path=$(jq -nr --arg package "$package" '$package | @uri')
+          deadline=$((SECONDS + 600))
+
+          until curl -fsS --max-time 10 -H 'Cache-Control: no-cache' \
+            "https://registry.npmjs.org/${package_path}/${version}" |
+            jq -e --arg package "$package" --arg version "$version" \
+              '.name == $package and .version == $version' >/dev/null; do
+            if (( SECONDS >= deadline )); then
+              echo "::error::$package@$version is still unavailable on npm after 10 minutes."
+              exit 1
+            fi
+            echo "Waiting for $package@$version to appear on npm..."
+            sleep 15
+          done
+          echo "Confirmed $package@$version is available on npm."
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
