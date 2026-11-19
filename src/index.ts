@@ -16,6 +16,7 @@ import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -35,6 +36,9 @@ const MAX_FETCH_CONTENT_CHARS = 30000;
 const MIB = 1024 * 1024;
 const OCR_MAX_FILE_BYTES = 100 * MIB;
 const ASR_MAX_FILE_BYTES = 8 * MIB;
+const OCR_TIMEOUT_MS = 185_000;
+const ASR_TIMEOUT_MS = 660_000;
+const SEARCH_MAX_CHARS = 128;
 
 const MAX_ATTEMPTS = 3;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
@@ -48,8 +52,6 @@ class ApiError extends Error {
     this.name = "ApiError";
   }
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function apiKey(): string {
   const key = process.env.DEEPSEEK_API_KEY;
@@ -109,13 +111,18 @@ async function callToolApi(
   endpoint: string,
   body: Record<string, unknown> | FormData,
   timeoutMs: number,
-  opts: { binary?: boolean } = {}
+  opts: { binary?: boolean; signal?: AbortSignal; retryTransportErrors?: boolean } = {}
 ): Promise<unknown> {
   const throttle = webThrottles.get(endpoint) ?? mediaThrottle;
+  const signal = opts.signal;
   let lastError: unknown = new Error("request failed");
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    signal?.throwIfAborted();
     await throttle();
+    signal?.throwIfAborted();
     const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       // For FormData, let fetch set the multipart Content-Type with its boundary.
@@ -137,16 +144,22 @@ async function callToolApi(
       if (!RETRYABLE_STATUS.has(res.status)) throw err;
       lastError = err;
     } catch (err) {
+      signal?.throwIfAborted();
       if (err instanceof ApiError && !RETRYABLE_STATUS.has(err.status)) throw err;
       if (err instanceof Error && err.name === "AbortError") {
         lastError = new Error(`Request timed out after ${timeoutMs}ms`);
       } else {
         lastError = err;
       }
+      // 本地超时或连接中断时，上游可能已经接收文件。
+      if (opts.retryTransportErrors === false) throw lastError;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
     }
-    if (attempt < MAX_ATTEMPTS) await sleep(600 * 2 ** (attempt - 1) + Math.random() * 250);
+    if (attempt < MAX_ATTEMPTS) {
+      await sleep(600 * 2 ** (attempt - 1) + Math.random() * 250, undefined, { signal });
+    }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
@@ -214,20 +227,30 @@ let uploadInProgress = false;
 async function uploadFile(
   endpoint: string,
   filePath: string,
-  maxBytes: number,
-  purpose?: string
+  { maxBytes, timeoutMs, signal, purpose }: {
+    maxBytes: number;
+    timeoutMs: number;
+    signal: AbortSignal;
+    purpose?: string;
+  }
 ): Promise<unknown> {
   if (uploadInProgress) throw new Error("Another file upload is in progress. Try again when it finishes.");
   uploadInProgress = true;
   try {
+    signal.throwIfAborted();
     apiKey();
     const form = new FormData();
     form.append("file", await readFileForUpload(filePath, maxBytes), basename(filePath));
     if (purpose !== undefined) form.append("purpose", purpose);
-    return await callToolApi(endpoint, form, 120_000);
+    return await callToolApi(endpoint, form, timeoutMs, { signal, retryTransportErrors: false });
   } finally {
     uploadInProgress = false;
   }
+}
+
+function withinSearchLength(text: string): boolean {
+  return text.length <= SEARCH_MAX_CHARS ||
+    (text.length <= SEARCH_MAX_CHARS * 2 && [...text].length <= SEARCH_MAX_CHARS);
 }
 
 const server = new McpServer({ name: "mcp-deepseek-search", version: VERSION });
@@ -246,14 +269,16 @@ server.registerTool(
       query: z
         .string()
         .min(1)
-        .max(128)
-        .describe("Search query, 1-128 Unicode chars. Supports site:, lang:, after:/before:, \"phrases\" and -exclusions."),
+        .refine((query) => withinSearchLength(query) && query.trim().length > 0,
+          `Query must contain 1-${SEARCH_MAX_CHARS} Unicode characters and cannot be blank.`)
+        .describe("Search query, 1-128 Unicode characters, not all whitespace. Supports site:, lang:, after:/before:, \"phrases\" and -exclusions."),
       count: z.number().int().min(1).max(50).optional().describe("Number of results to return, 1-50. Default 10."),
       ori_question: z
         .string()
-        .max(4000)
-        .optional()
-        .describe("The user's original question, if the query was rewritten. Improves intent understanding."),
+        .min(1)
+        .refine(withinSearchLength, `Original question must contain 1-${SEARCH_MAX_CHARS} Unicode characters.`)
+        .nullish()
+        .describe("The user's original question, 1-128 Unicode characters, if the query was rewritten. Omit or pass null when unavailable."),
       localization: z
         .string()
         .optional()
@@ -342,26 +367,30 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async (args) => {
+  async (args, { signal }) => {
     try {
-      const data = (await uploadFile(
-        OCR_ENDPOINT,
-        args.file_path,
-        OCR_MAX_FILE_BYTES,
-        args.purpose ?? "text_recognition"
-      )) as {
+      const data = (await uploadFile(OCR_ENDPOINT, args.file_path, {
+        maxBytes: OCR_MAX_FILE_BYTES,
+        timeoutMs: OCR_TIMEOUT_MS,
+        signal,
+        purpose: args.purpose ?? "text_recognition",
+      })) as {
+        error?: { message?: string };
         id?: string;
         purpose?: string;
         page_count?: number;
         pages?: Record<string, unknown>[];
         usage?: Record<string, unknown>;
       };
-      const pages = Array.isArray(data.pages) ? data.pages : [];
+      if (data?.error) throw new Error(data.error.message || "DeepSeek returned an OCR error.");
+      if (!Array.isArray(data?.pages) || data.page_count !== data.pages.length) {
+        throw new Error("DeepSeek returned an invalid OCR result.");
+      }
       const payload = {
         id: data.id,
         purpose: data.purpose,
         page_count: data.page_count,
-        pages: pages.map((p) => ({
+        pages: data.pages.map((p) => ({
           index: p.index,
           finish_reason: p.finish_reason,
           text: truncate(p.text, MAX_CONTENT_CHARS_PER_RESULT),
@@ -390,9 +419,13 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async (args) => {
+  async (args, { signal }) => {
     try {
-      const data = (await uploadFile(ASR_ENDPOINT, args.file_path, ASR_MAX_FILE_BYTES)) as {
+      const data = (await uploadFile(ASR_ENDPOINT, args.file_path, {
+        maxBytes: ASR_MAX_FILE_BYTES,
+        timeoutMs: ASR_TIMEOUT_MS,
+        signal,
+      })) as {
         request_id?: string;
         text?: string;
         duration_ms?: number;

@@ -72,9 +72,9 @@ node dist/index.js   # stdio MCP server
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `query` | string | yes | 1–128 chars; supports the search syntax above |
+| `query` | string | yes | 1–128 Unicode characters, with at least one non-whitespace character |
 | `count` | integer | no | 1–50 results, default 10 (does not affect billing) |
-| `ori_question` | string | no | The user's original question — improves intent matching when the query was rewritten |
+| `ori_question` | string or null | no | The user's original question, 1–128 Unicode characters. Omit it or pass `null` when unavailable |
 | `localization` | string | no | User IP to localize results (pass only with consent) |
 | `need_content` | boolean | no | Include full page text per result (each truncated at 8,000 chars). Default `false` |
 
@@ -95,7 +95,7 @@ Returns `title` + Markdown `content` (truncated at 30,000 chars).
 | `file_path` | string | yes | Local path to a PDF, Word, PowerPoint or image file |
 | `purpose` | string | no | `text_recognition` (default) or `rich_layout_recognition` (page-by-page layout-aware recognition) |
 
-Returns per-page `text` (each page truncated at 8,000 chars) with `page_count` and `finish_reason` per page.
+Returns per-page `text` (each page truncated at 8,000 chars) with `page_count` and `finish_reason` per page. DeepSeek recognition errors are returned as tool errors, including errors sent in an HTTP 200 response.
 
 ### `deepseek_asr`
 
@@ -125,6 +125,7 @@ Ask your agent: *"用 deepseek_search 搜一下最近一周关于 MCP 的大新�
 - Page content depends on the target site's availability and access policy.
 - OCR / ASR / TTS have their own file-format and billing rules — see the [API docs](https://api-docs.deepseek.com/zh-cn/api/ocr) for details.
 - OCR and ASR accept regular files up to 100 MiB and 8 MiB, respectively. Each server process handles one file upload at a time. If an upload is already running, retry after it finishes.
+- The server allows 185 seconds per OCR HTTP attempt, including the upstream 180-second operation budget and connection time. ASR allows up to 11 minutes per HTTP attempt so the 10-minute upstream upload window leaves time for recognition. MCP clients may have shorter tool timeouts. The server only retries uploads after a retryable HTTP status. Local timeouts or interrupted connections have an unknown outcome, so the file is not automatically sent again. [OCR limits](https://api-docs.deepseek.com/guides/ocr/) · [ASR limits](https://api-docs.deepseek.com/guides/asr/)
 - This is an unofficial community wrapper; not affiliated with DeepSeek.
 
 ## Development
@@ -132,6 +133,7 @@ Ask your agent: *"用 deepseek_search 搜一下最近一周关于 MCP 的大新�
 ```bash
 npm install
 npm run build
+npm run test:contract           # Search, OCR and ASR API contract tests using simulated responses
 npm run test:security           # file tool regression tests with a local mock API
 DEEPSEEK_API_KEY=sk-... npm test   # end-to-end test against the real API
 ```

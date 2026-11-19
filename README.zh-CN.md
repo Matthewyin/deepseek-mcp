@@ -49,9 +49,9 @@ DEEPSEEK_API_KEY = "sk-your-key-here"
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
-| `query` | 是 | 1–128 字符。支持 `site:`、`-site:`、`-关键词`、`"精确短语"`、`-"排除短语"`、`lang:zh,en`、`after:YYYY-MM-DD` 和 `before:YYYY-MM-DD` |
+| `query` | 是 | 1–128 个 Unicode 字符，至少包含一个非空白字符。支持 `site:`、`-site:`、`-关键词`、`"精确短语"`、`-"排除短语"`、`lang:zh,en`、`after:YYYY-MM-DD` 和 `before:YYYY-MM-DD` |
 | `count` | 否 | 返回 1–50 条结果，默认 10 条 |
-| `ori_question` | 否 | 查询经过改写时，可传入用户的原始问题，帮助匹配搜索意图 |
+| `ori_question` | 否 | 原始问题为 1–128 个 Unicode 字符。没有原始问题时可省略或传 `null` |
 | `localization` | 否 | 用户 IP，用于按地区调整结果，经用户同意后传入 |
 | `need_content` | 否 | 默认返回摘要。设为 `true` 时附带网页正文，每条正文最多保留 8,000 字符 |
 
@@ -63,7 +63,7 @@ DEEPSEEK_API_KEY = "sk-your-key-here"
 
 ### `deepseek_ocr` 文字识别
 
-传入本地文件路径 `file_path`，支持 PDF、Word、PowerPoint 和图片，包括扫描件。可选的 `purpose` 默认为 `text_recognition`。复杂版面可选择 `rich_layout_recognition`，启用逐页版面识别。结果包含页数、每页文字和识别结束原因，每页文字最多保留 8,000 字符。
+传入本地文件路径 `file_path`，支持 PDF、Word、PowerPoint 和图片，包括扫描件。可选的 `purpose` 默认为 `text_recognition`。复杂版面可选择 `rich_layout_recognition`，启用逐页版面识别。结果包含页数、每页文字和识别结束原因，每页文字最多保留 8,000 字符。即使 DeepSeek 通过 HTTP 200 返回识别错误，工具也会报告失败。
 
 ### `deepseek_asr` 语音转写
 
@@ -87,6 +87,7 @@ DEEPSEEK_API_KEY = "sk-your-key-here"
 ## 使用限制
 
 - OCR 和 ASR 会把指定文件上传到 DeepSeek。两者只接受普通文件，大小上限分别为 100 MiB 和 8 MiB。每个 MCP 服务进程同时处理一次上传，忙时可等当前上传完成后重试。[OCR 文档](https://api-docs.deepseek.com/zh-cn/guides/ocr/) · [语音识别文档](https://api-docs.deepseek.com/zh-cn/guides/asr/)
+- OCR 单次 HTTP 请求最多等待 185 秒，覆盖上游 180 秒全流程并留出连接时间。ASR 单次最多等待 11 分钟，为上游 10 分钟上传窗口及后续识别预留时间。MCP 客户端可能有更短的超时。上传仅在收到可重试的 HTTP 状态时自动重试。本地超时或连接中断时，上游处理结果未知，工具会返回错误。
 - DeepSeek 按账号分别限制 Search **100 QPS**、Fetch **25 QPS**，Fetch 还有目标域名限速。每个 MCP 服务进程对 Search 和 Fetch 独立限速，重试也计入对应接口的请求。同一账号启动的多个进程共用 DeepSeek 账号额度。[官方限速说明](https://api-docs.deepseek.com/zh-cn/guides/search/#限速)
 - 服务对 HTTP 408、429 和部分 5xx 错误自动重试。HTTP 401 表示密钥无效，402 表示余额不足。
 - 工具调用按 DeepSeek 的规则计费。[DeepSeek API 文档](https://api-docs.deepseek.com/zh-cn/)
@@ -98,11 +99,12 @@ git clone https://github.com/Matthewyin/deepseek-mcp
 cd deepseek-mcp
 npm install
 npm run build
+npm run test:contract
 npm run test:security
 DEEPSEEK_API_KEY=sk-... npm test
 ```
 
-`npm run test:security` 使用本地模拟 API 检查文件工具的安全行为。`npm test` 会调用真实 DeepSeek API。构建后可用 `node dist/index.js` 启动标准输入输出（stdio）服务。
+`npm run test:contract` 使用模拟响应验证 Search、OCR 和 ASR 的 API 契约。`npm run test:security` 使用本地模拟 API 检查文件工具的安全行为。`npm test` 会调用真实 DeepSeek API。构建后可用 `node dist/index.js` 启动标准输入输出（stdio）服务。
 
 推送 `v*` 标签会触发 GitHub Actions。工作流先发布到 npm，最多等待约 10 分钟确认公开接口能查询到目标版本，然后将 `server.json` 发布到官方 MCP Registry。
 
