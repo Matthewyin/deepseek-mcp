@@ -38,8 +38,9 @@ const ASR_MAX_FILE_BYTES = 8 * MIB;
 
 const MAX_ATTEMPTS = 3;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
-// Account-level limit is 5 QPS; stay comfortably below it.
-const MIN_INTERVAL_MS = 220;
+const SEARCH_QPS = 100;
+const FETCH_QPS = 25;
+const MEDIA_MIN_INTERVAL_MS = 220;
 
 class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -60,14 +61,29 @@ function apiKey(): string {
   return key;
 }
 
-// Serialize calls so concurrent tool invocations stay under the QPS limit.
-let nextSlot = 0;
-async function throttle(): Promise<void> {
-  const now = Date.now();
-  const wait = Math.max(0, nextSlot - now);
-  nextSlot = Math.max(now, nextSlot) + MIN_INTERVAL_MS;
-  if (wait > 0) await sleep(wait);
+function createThrottle(intervalMs: number): () => Promise<void> {
+  let nextStart = 0;
+  let queue = Promise.resolve();
+  return () => {
+    queue = queue.then(async () => {
+      let waitMs = nextStart - performance.now();
+      while (waitMs > 0) {
+        await sleep(Math.ceil(waitMs));
+        waitMs = nextStart - performance.now();
+      }
+      // 从实际放行时刻计算下次间隔，避免定时器延迟后集中放行。
+      nextStart = performance.now() + intervalMs;
+    });
+    return queue;
+  };
 }
+
+// 比官方额度对应的间隔多留 1 毫秒。
+const webThrottles = new Map([
+  [SEARCH_ENDPOINT, createThrottle(Math.ceil(1000 / SEARCH_QPS) + 1)],
+  [FETCH_ENDPOINT, createThrottle(Math.ceil(1000 / FETCH_QPS) + 1)],
+]);
+const mediaThrottle = createThrottle(MEDIA_MIN_INTERVAL_MS);
 
 function friendlyStatus(status: number, body: string): string {
   const detail = body.slice(0, 300);
@@ -95,6 +111,7 @@ async function callToolApi(
   timeoutMs: number,
   opts: { binary?: boolean } = {}
 ): Promise<unknown> {
+  const throttle = webThrottles.get(endpoint) ?? mediaThrottle;
   let lastError: unknown = new Error("request failed");
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     await throttle();

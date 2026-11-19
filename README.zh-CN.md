@@ -6,11 +6,15 @@
 [![MIT 许可证](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![官方 MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.Matthewyin-blue)](https://registry.modelcontextprotocol.io/)
 
-在 Claude Desktop、Claude Code、Cursor、Cline、ZCode 等支持 [MCP](https://modelcontextprotocol.io/) 的客户端里使用 DeepSeek 的网页搜索、网页正文提取、OCR、语音转写和语音合成工具。客户端启动本地 MCP 服务，服务调用 DeepSeek API，再把结果返回给你当前使用的模型。
+在 Claude Code、Codex 和 ZCode 中通过 [MCP](https://modelcontextprotocol.io/) 使用 DeepSeek 的网页搜索、网页正文提取、OCR、语音转写和语音合成工具。客户端启动本地 MCP 服务，服务调用 DeepSeek API，再把结果返回给你当前使用的模型。
 
 ## 安装
 
-需要 Node.js 18 或更高版本，以及 [DeepSeek 开放平台](https://platform.deepseek.com/) 的 API 密钥。在客户端的 MCP 配置里添加以下内容，然后把占位值换成你的密钥。ZCode 可在「设置 → MCP → 添加服务器」中填写。
+需要 Node.js 18 或更高版本，以及 [DeepSeek 开放平台](https://platform.deepseek.com/) 的 API 密钥。
+
+### Claude Code 和 ZCode
+
+Claude Code 将下面的配置添加到项目的 `.mcp.json`，并把占位值改为 `${DEEPSEEK_API_KEY}`，从环境变量读取密钥。ZCode 在「设置 → MCP → 添加服务器」中填写，并把占位值换成你的密钥。
 
 ```json
 {
@@ -24,6 +28,19 @@
     }
   }
 }
+```
+
+### Codex
+
+将以下内容添加到 `~/.codex/config.toml`，并把占位值换成你的密钥。
+
+```toml
+[mcp_servers.deepseek-web]
+command = "npx"
+args = ["-y", "mcp-deepseek-search"]
+
+[mcp_servers.deepseek-web.env]
+DEEPSEEK_API_KEY = "sk-your-key-here"
 ```
 
 ## 工具
@@ -70,7 +87,8 @@
 ## 使用限制
 
 - OCR 和 ASR 会把指定文件上传到 DeepSeek。两者只接受普通文件，大小上限分别为 100 MiB 和 8 MiB。每个 MCP 服务进程同时处理一次上传，忙时可等当前上传完成后重试。[OCR 文档](https://api-docs.deepseek.com/zh-cn/guides/ocr/) · [语音识别文档](https://api-docs.deepseek.com/zh-cn/guides/asr/)
-- 服务会对 DeepSeek 请求进行限速，对 HTTP 408、429 和部分 5xx 错误自动重试。HTTP 401 表示密钥无效，402 表示余额不足。
+- DeepSeek 按账号分别限制 Search **100 QPS**、Fetch **25 QPS**，Fetch 还有目标域名限速。每个 MCP 服务进程对 Search 和 Fetch 独立限速，重试也计入对应接口的请求。同一账号启动的多个进程共用 DeepSeek 账号额度。[官方限速说明](https://api-docs.deepseek.com/zh-cn/guides/search/#限速)
+- 服务对 HTTP 408、429 和部分 5xx 错误自动重试。HTTP 401 表示密钥无效，402 表示余额不足。
 - 工具调用按 DeepSeek 的规则计费。[DeepSeek API 文档](https://api-docs.deepseek.com/zh-cn/)
 
 ## 开发和发布

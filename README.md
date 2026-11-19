@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.Matthewyin-blue)](https://registry.modelcontextprotocol.io)
 
-An [Model Context Protocol](https://modelcontextprotocol.io) server that exposes [DeepSeek's web **Search**, **Fetch**, **OCR**, **ASR** and **TTS** tools](https://api-docs.deepseek.com/zh-cn/api/search) to any MCP client — Claude Desktop, Claude Code, Cursor, Cline, ZCode, and more.
+An [MCP](https://modelcontextprotocol.io) server for using DeepSeek's **Search**, **Fetch**, **OCR**, **ASR** and **TTS** tools in Claude Code, Codex and ZCode.
 
 Works with **any** LLM: the tools run on DeepSeek's APIs, but the results are returned to your existing model as ordinary tool output.
 
@@ -20,15 +20,16 @@ Works with **any** LLM: the tools run on DeepSeek's APIs, but the results are re
 - **`deepseek_asr`** — transcribe 16-bit PCM WAV or Ogg Opus audio to text
 - **`deepseek_tts`** — synthesize speech (`stella` female / `tide` male) to a local wav/pcm file
 - Powerful query syntax: `site:`, `-site:`, `-term`, `"exact phrase"`, `-"phrase"`, `lang:zh,en`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`
-- Built-in throttling (stays under the 5 QPS account limit) and automatic retry on 408/429/5xx
+- Independent throttling for Search and Fetch, with automatic retry on 408/429 and selected 5xx errors
 - Response-size friendly: summaries by default, full page text only on request
 
 ## Setup
 
-1. Get an API key at [platform.deepseek.com](https://platform.deepseek.com) (web tools are billed at **¥5 per 1,000 successful calls**, charged to your DeepSeek account — failed calls and empty results are not billed).
-2. Add the server to your MCP client config:
+Get an API key at [platform.deepseek.com](https://platform.deepseek.com). Web tools cost **¥5 per 1,000 successful calls**. Failed calls and empty results are free.
 
-### Claude Desktop / Cursor / Cline / most clients
+### Claude Code and ZCode
+
+For Claude Code, add this block to your project's `.mcp.json` and replace the placeholder with `${DEEPSEEK_API_KEY}` to read the key from your environment. In ZCode, open **Settings → MCP → Add server** and replace the placeholder with your key.
 
 ```json
 {
@@ -44,9 +45,18 @@ Works with **any** LLM: the tools run on DeepSeek's APIs, but the results are re
 }
 ```
 
-### ZCode
+### Codex
 
-Add the same `mcpServers` block to your ZCode MCP settings (Settings → MCP → Add server).
+Add this block to `~/.codex/config.toml` and replace the placeholder with your key.
+
+```toml
+[mcp_servers.deepseek-web]
+command = "npx"
+args = ["-y", "mcp-deepseek-search"]
+
+[mcp_servers.deepseek-web.env]
+DEEPSEEK_API_KEY = "sk-your-key-here"
+```
 
 ### From source
 
@@ -110,7 +120,7 @@ Ask your agent: *"用 deepseek_search 搜一下最近一周关于 MCP 的大新�
 
 ## Notes & limits
 
-- Rate limit is **5 QPS per DeepSeek account** (shared across all your API keys); the server throttles automatically.
+- DeepSeek limits Search to **100 QPS** and Fetch to **25 QPS** separately per account. Fetch also has a per-domain limit. Each MCP server process spaces Search and Fetch attempts, including retries, independently. Multiple processes using the same account share DeepSeek's limits. [DeepSeek rate limits](https://api-docs.deepseek.com/guides/search/#rate-limits)
 - HTTP 402 means your DeepSeek balance ran out; 401 means the key is invalid.
 - Page content depends on the target site's availability and access policy.
 - OCR / ASR / TTS have their own file-format and billing rules — see the [API docs](https://api-docs.deepseek.com/zh-cn/api/ocr) for details.
