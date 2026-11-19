@@ -12,7 +12,8 @@
  * API docs: https://api-docs.deepseek.com/zh-cn/guides/search
  */
 import { createRequire } from "node:module";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -31,6 +32,9 @@ const TTS_ENDPOINT = `${API_BASE}/v1/tools/tts`;
 
 const MAX_CONTENT_CHARS_PER_RESULT = 8000;
 const MAX_FETCH_CONTENT_CHARS = 30000;
+const MIB = 1024 * 1024;
+const OCR_MAX_FILE_BYTES = 100 * MIB;
+const ASR_MAX_FILE_BYTES = 8 * MIB;
 
 const MAX_ATTEMPTS = 3;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
@@ -158,14 +162,54 @@ function toolError(tool: string, err: unknown) {
   };
 }
 
-async function readFileForUpload(filePath: string): Promise<Buffer> {
+async function readFileForUpload(filePath: string, maxBytes: number): Promise<Blob> {
   try {
-    return await readFile(filePath);
+    // 以非阻塞方式打开，避免在检查文件类型之前等待管道。
+    const file = await open(filePath, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile()) throw new Error(`Expected a regular file: ${filePath}`);
+      const size = stat.size;
+      if (size > maxBytes) throw new Error(`File is too large: maximum ${maxBytes / MIB} MiB`);
+
+      // 多读一个字节，检测文件在检查大小后是否增长。
+      const buffer = Buffer.allocUnsafe(size + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await file.read(buffer, length, buffer.length - length, null);
+        if (bytesRead === 0) return new Blob([buffer.subarray(0, length)]);
+        length += bytesRead;
+      }
+      throw new Error(`File grew while being read: ${filePath}`);
+    } finally {
+      await file.close();
+    }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") throw new Error(`File not found: ${filePath}`);
     if (code === "EISDIR") throw new Error(`Path is a directory, not a file: ${filePath}`);
     throw err;
+  }
+}
+
+let uploadInProgress = false;
+
+async function uploadFile(
+  endpoint: string,
+  filePath: string,
+  maxBytes: number,
+  purpose?: string
+): Promise<unknown> {
+  if (uploadInProgress) throw new Error("Another file upload is in progress. Try again when it finishes.");
+  uploadInProgress = true;
+  try {
+    apiKey();
+    const form = new FormData();
+    form.append("file", await readFileForUpload(filePath, maxBytes), basename(filePath));
+    if (purpose !== undefined) form.append("purpose", purpose);
+    return await callToolApi(endpoint, form, 120_000);
+  } finally {
+    uploadInProgress = false;
   }
 }
 
@@ -283,11 +327,12 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const buffer = await readFileForUpload(args.file_path);
-      const form = new FormData();
-      form.append("file", new Blob([new Uint8Array(buffer)]), basename(args.file_path));
-      form.append("purpose", args.purpose ?? "text_recognition");
-      const data = (await callToolApi(OCR_ENDPOINT, form, 120_000)) as {
+      const data = (await uploadFile(
+        OCR_ENDPOINT,
+        args.file_path,
+        OCR_MAX_FILE_BYTES,
+        args.purpose ?? "text_recognition"
+      )) as {
         id?: string;
         purpose?: string;
         page_count?: number;
@@ -330,10 +375,7 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const buffer = await readFileForUpload(args.file_path);
-      const form = new FormData();
-      form.append("file", new Blob([new Uint8Array(buffer)]), basename(args.file_path));
-      const data = (await callToolApi(ASR_ENDPOINT, form, 120_000)) as {
+      const data = (await uploadFile(ASR_ENDPOINT, args.file_path, ASR_MAX_FILE_BYTES)) as {
         request_id?: string;
         text?: string;
         duration_ms?: number;
@@ -372,9 +414,9 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Where to write the audio file. Defaults to a temp file; the resolved path is in the result."),
+        .describe("Path for a new audio file. Existing paths are rejected. Defaults to a private temp file."),
     },
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   async (args) => {
     try {
@@ -382,9 +424,18 @@ server.registerTool(
       const body: Record<string, unknown> = { text: args.text, format };
       if (args.voice_id) body.voice_id = args.voice_id;
       const audio = (await callToolApi(TTS_ENDPOINT, body, 120_000, { binary: true })) as Buffer;
-      const outPath = args.output_path ?? join(tmpdir(), `deepseek-tts-${Date.now()}.${format}`);
-      await mkdir(dirname(outPath), { recursive: true });
-      await writeFile(outPath, audio);
+      const outPath = args.output_path ??
+        join(await mkdtemp(join(tmpdir(), "deepseek-tts-")), `speech.${format}`);
+      if (args.output_path) await mkdir(dirname(outPath), { recursive: true });
+      try {
+        await writeFile(outPath, audio, { flag: "wx", mode: 0o600 });
+      } catch (err) {
+        if (!args.output_path) await rm(dirname(outPath), { recursive: true, force: true }).catch(() => {});
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new Error(`Output file already exists: ${outPath}`);
+        }
+        throw err;
+      }
       const payload = {
         output_path: outPath,
         format,

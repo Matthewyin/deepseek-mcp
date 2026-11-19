@@ -100,7 +100,7 @@ Returns `text` and `duration_ms`.
 | `text` | string | yes | The text to speak |
 | `voice_id` | string | no | `stella` (female, default) or `tide` (male) |
 | `format` | string | no | `wav` (default) or raw `pcm` (24 kHz, 16-bit signed, mono) |
-| `output_path` | string | no | Where to write the audio file; defaults to a temp file. The resolved path is returned |
+| `output_path` | string | no | Path for a new audio file. Existing paths are rejected. Defaults to a file in a private temp directory |
 
 ## Example
 
@@ -112,6 +112,7 @@ Ask your agent: *"用 deepseek_search 搜一下最近一周关于 MCP 的大新�
 - HTTP 402 means your DeepSeek balance ran out; 401 means the key is invalid.
 - Page content depends on the target site's availability and access policy.
 - OCR / ASR / TTS have their own file-format and billing rules — see the [API docs](https://api-docs.deepseek.com/zh-cn/api/ocr) for details.
+- OCR and ASR accept regular files up to 100 MiB and 8 MiB, respectively. Each server process handles one file upload at a time. If an upload is already running, retry after it finishes.
 - This is an unofficial community wrapper; not affiliated with DeepSeek.
 
 ## Development
@@ -119,6 +120,7 @@ Ask your agent: *"用 deepseek_search 搜一下最近一周关于 MCP 的大新�
 ```bash
 npm install
 npm run build
+npm run test:security           # file tool regression tests with a local mock API
 DEEPSEEK_API_KEY=sk-... npm test   # end-to-end test against the real API
 ```
 
